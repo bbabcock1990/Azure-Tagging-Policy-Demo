@@ -28,9 +28,11 @@ Designed as a starter / teaching example. Bicep-first. No external files require
 | Policy definition | `demo-require-rg-tag` | Single-tag **deny**. Referenced once per tag in `tagsToEnforce`. Not remediable. |
 | Policy definition | `demo-inherit-tag-from-rg` | Single-tag **modify** on child resources. Referenced once per tag in `tagsToEnforce`. Remediable. |
 | Policy definition | `demo-set-default-rg-tag` | Single-tag **modify** on the RG itself. Referenced once per key in `tagDefaults` (optional). Remediable — use this to back-fill RGs that existed before the policy was assigned. |
-| Initiative | `demo-rg-tagging-standard` | Bundles all `require-*`, `inherit-*`, and `default-*` references. |
-| Assignment | `demo-rg-tagging-standard` | System-assigned identity. Per-ref non-compliance messages. |
-| Role assignment | Tag Contributor at the target scope | Granted to the assignment's managed identity so `modify` remediation can write tags. |
+| Initiative | `demo-rg-tagging-standard` | Bundles all `require-*` and `inherit-*` references. Enforces deny + propagation at request time. |
+| Initiative | `demo-rg-tagging-defaults` *(only if `tagDefaults` is supplied)* | Bundles all `default-*` references. Used for remediation only. |
+| Assignment | `demo-rg-tagging-standard` (`enforcementMode: Default`) | System-assigned identity. Per-ref non-compliance messages on each `require-*`. |
+| Assignment | `demo-rg-tagging-defaults` (`enforcementMode: DoNotEnforce`) *(only if `tagDefaults` is supplied)* | System-assigned identity. Does NOT mutate request-time — deny on the main assignment still wins. Remediation tasks back-fill missing tags on existing RGs. |
+| Role assignment | Tag Contributor at the target scope | Granted to each assignment's managed identity so `modify` remediation can write tags. |
 
 ## Sample tag schema
 
@@ -303,13 +305,15 @@ Example (when `Environment` is missing, deployed with `organizationName='Acme Co
 
 ## Remediating existing resources
 
-The policy pack creates **two kinds** of compliance findings against your existing estate:
+The policy pack creates **three kinds** of compliance findings against your existing estate:
 
-| Finding | Source | Remediable? | What to do |
-| --- | --- | --- | --- |
-| RG is missing required tag | `require-<TagName>` (deny) | ❌ No (deny effect) | Either edit the RG by hand to add the tag, **or** also supply `tagDefaults` at deploy time and run a remediation task against the matching `default-<TagName>` reference. |
-| Child resource is missing a tag the RG has | `inherit-<TagName>` (modify) | ✅ Yes | Run a remediation task against the `inherit-<TagName>` reference. |
-| RG is missing a tag listed in `tagDefaults` | `default-<TagName>` (modify) | ✅ Yes | Run a remediation task against the `default-<TagName>` reference — the RG will be tagged with the value you supplied in `tagDefaults`. |
+| Finding | Source | Assignment | Remediable? | What to do |
+| --- | --- | --- | --- | --- |
+| RG is missing required tag | `require-<TagName>` (deny) | `demo-rg-tagging-standard` | ❌ No (deny effect) | Either edit the RG by hand to add the tag, **or** also supply `tagDefaults` at deploy time and run a remediation task against the matching `default-<TagName>` reference. |
+| Child resource is missing a tag the RG has | `inherit-<TagName>` (modify) | `demo-rg-tagging-standard` | ✅ Yes | Run a remediation task against the `inherit-<TagName>` reference. |
+| RG is missing a tag listed in `tagDefaults` | `default-<TagName>` (modify) | `demo-rg-tagging-defaults` *(separate)* | ✅ Yes | Run a remediation task against the `default-<TagName>` reference — the RG will be tagged with the value you supplied in `tagDefaults`. |
+
+> The `default-*` policies live in a **separate** assignment (`demo-rg-tagging-defaults`) with `enforcementMode: DoNotEnforce`. See the [How defaults and deny coexist](#how-defaults-and-deny-coexist) section below for why.
 
 ### Deploy with defaults to back-fill existing RGs
 
@@ -324,17 +328,17 @@ az deployment mg create \
                tagDefaults='{"Environment":"unknown","CostCenter":"CC-0000","Owner":"unassigned@example.com","Application":"unassigned"}'
 ```
 
-> Only the keys present in `tagDefaults` get a `default-*` reference in the initiative. Keys can be a subset of `tagsToEnforce` if you only want to back-fill some of the required tags.
+> Only the keys present in `tagDefaults` get a `default-*` reference. Keys can be a subset of `tagsToEnforce` if you only want to back-fill some of the required tags.
 
 ### Trigger the remediation task
 
 **Portal (easiest):**
 
 1. **Policy → Remediation → Create remediation task**
-2. Pick the `demo-rg-tagging-standard` assignment
+2. Pick the **`demo-rg-tagging-defaults`** assignment (NOT the `-standard` one — defaults live in their own assignment)
 3. Choose a `default-<TagName>` reference (e.g. `default-Environment`)
 4. Scope to the management group or subscription you want to back-fill
-5. Repeat per tag (and per `inherit-<TagName>` reference if you also want child-resource back-fill)
+5. Repeat per tag
 
 **CLI:**
 
@@ -343,7 +347,7 @@ az deployment mg create \
 az policy remediation create \
   --name remediate-default-Environment \
   --management-group mg-demo-group \
-  --policy-assignment demo-rg-tagging-standard \
+  --policy-assignment demo-rg-tagging-defaults \
   --definition-reference-id default-Environment \
   --resource-discovery-mode ExistingNonCompliant
 
@@ -355,33 +359,43 @@ az policy remediation show \
 
 `--resource-discovery-mode ExistingNonCompliant` only touches resources already evaluated as non-compliant (fast). Use `ReEvaluateCompliance` if you suspect the compliance picture is stale.
 
-### Heads-up on Modify + RG-level deny interaction
+### How defaults and deny coexist
 
-When you deploy with both `require-<TagName>` (deny) and `default-<TagName>` (modify) for the same tag:
+Azure Policy evaluates effects in this order at **request time**: `Disabled → Append/Modify → Audit → Deny`. If we bundled `default-*` (modify) into the same assignment as `require-*` (deny), the modify would fire first and silently inject the default tag into a brand-new RG-create request — **the deny would never reject it**. That defeats the whole point of the deny.
 
-- **Create / update** of an RG without the tag still gets **denied** at the request layer — modify doesn't pre-empt deny, the deny condition matches first. So users see the rejection message and have to provide the tag themselves on new RGs.
-- **Existing** RGs missing the tag stay marked non-compliant, but a remediation task against the `default-*` reference will silently add the default value (no deny happens during a policy-triggered modify operation).
+To prevent that, the `default-*` policies live in a **separate assignment** (`demo-rg-tagging-defaults`) with **`enforcementMode: 'DoNotEnforce'`**:
 
-This is the intended Azure Policy behavior — your standards stay enforced at create-time, while back-fill of legacy RGs is opt-in via `tagDefaults`.
+| Scenario | What happens |
+| --- | --- |
+| `az group create` with no tags | Main assignment's deny fires and rejects the request. The defaults assignment's modify is **skipped** (DoNotEnforce). The user sees the rejection message and must supply tags themselves. |
+| Existing RG missing the tag | Both assignments mark it non-compliant. Manual remediation task against `default-<TagName>` (on the defaults assignment) back-fills the tag — DoNotEnforce does NOT block remediation tasks, only request-time enforcement. |
+
+This is the only way to get "deny wins on create, but I can still remediate existing RGs" — Azure Policy doesn't expose per-reference enforcement overrides, so two assignments are required.
 
 ## Cleanup
 
-```powershell
-# Delete the assignment first (releases the managed identity)
-az policy assignment delete --name demo-rg-tagging-standard `
-  --scope /providers/Microsoft.Management/managementGroups/<your-management-group-id>
+```bash
+MG=<your-management-group-id>
 
-# Then the initiative
-az policy set-definition delete --name demo-rg-tagging-standard `
-  --management-group <your-management-group-id>
+# Delete the assignments first (releases their managed identities)
+az policy assignment delete --name demo-rg-tagging-standard \
+  --scope /providers/Microsoft.Management/managementGroups/$MG
+az policy assignment delete --name demo-rg-tagging-defaults \
+  --scope /providers/Microsoft.Management/managementGroups/$MG
+
+# Then the initiatives
+az policy set-definition delete --name demo-rg-tagging-standard \
+  --management-group $MG
+az policy set-definition delete --name demo-rg-tagging-defaults \
+  --management-group $MG
 
 # Then the policy definitions
-az policy definition delete --name demo-require-rg-tag `
-  --management-group <your-management-group-id>
-az policy definition delete --name demo-inherit-tag-from-rg `
-  --management-group <your-management-group-id>
-az policy definition delete --name demo-set-default-rg-tag `
-  --management-group <your-management-group-id>
+az policy definition delete --name demo-require-rg-tag \
+  --management-group $MG
+az policy definition delete --name demo-inherit-tag-from-rg \
+  --management-group $MG
+az policy definition delete --name demo-set-default-rg-tag \
+  --management-group $MG
 ```
 
 ## Known gotchas
@@ -397,6 +411,7 @@ az policy definition delete --name demo-set-default-rg-tag `
   ```
 - **Modify mode is `Indexed`**, so non-taggable / proxy resource types are not evaluated. This matches Microsoft's own "Inherit tag from RG" built-in policies. The `demo-set-default-rg-tag` definition uses mode `All` because RGs themselves are not in the indexed scope.
 - **Deny policies cannot be remediated.** That's why `tagDefaults` exists — it adds a sibling `modify` policy per tag so existing non-compliant RGs can be back-filled. See [Remediating existing resources](#remediating-existing-resources).
+- **Modify-before-Deny precedence.** This is the reason `default-*` policies live in a separate `DoNotEnforce` assignment, not bundled with the deny initiative. Bundling them would let modify silently auto-tag new RGs and bypass the deny rule. See [How defaults and deny coexist](#how-defaults-and-deny-coexist).
 - **Initiative param passthrough** (`[parameters('x')]` inside a policy ref) is fragile when authored from Bicep — the value gets baked at deploy time. This template intentionally bakes effects at deploy time and does not expose initiative-level effect parameters. To change effects, redeploy with different parameter values.
 
 ## License

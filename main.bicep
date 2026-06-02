@@ -337,7 +337,7 @@ resource initiative 'Microsoft.Authorization/policySetDefinitions@2023-04-01' = 
   name: 'demo-rg-tagging-standard'
   properties: {
     displayName: '${organizationName} - Resource Group Tagging Standard'
-    description: 'Enforces required RG tags AND propagates them to children. Optional defaulting on existing RGs.'
+    description: 'Enforces required RG tags (deny on create/update without them) AND propagates tags from RG to child resources at create-time.'
     policyType: 'Custom'
     metadata: {
       category: 'Tags'
@@ -345,11 +345,36 @@ resource initiative 'Microsoft.Authorization/policySetDefinitions@2023-04-01' = 
       source: 'azure-tagging-policy-demo'
       owner: '${organizationName} Cloud Governance'
     }
-    policyDefinitions: concat(denyPolicyRefs, inheritPolicyRefs, defaultPolicyRefs)
+    policyDefinitions: concat(denyPolicyRefs, inheritPolicyRefs)
   }
 }
 
-// -------- Assignment --------
+// -------- Initiative (defaults — only created when tagDefaults is supplied) --------
+// Kept as a SEPARATE initiative + assignment so the deny effect from the main
+// initiative is always the one that fires on RG create/update. If we bundled
+// the default-* refs alongside deny, Azure Policy effect precedence (Modify
+// runs BEFORE Deny) would silently inject the default tag on create, bypassing
+// the deny rule. By isolating defaults in a DoNotEnforce assignment, the modify
+// effect skips request-time mutation while still producing compliance findings
+// and supporting remediation tasks against existing non-compliant RGs.
+
+resource initiativeDefaults 'Microsoft.Authorization/policySetDefinitions@2023-04-01' = if (!empty(tagDefaults)) {
+  name: 'demo-rg-tagging-defaults'
+  properties: {
+    displayName: '${organizationName} - RG Tagging Defaults (Remediation Only)'
+    description: 'Companion initiative to the Resource Group Tagging Standard. Holds the per-tag default-set Modify policies that back-fill missing tags on existing RGs via remediation tasks. Assigned with enforcementMode=DoNotEnforce so it does NOT mutate new RG creates — the deny enforcement on the main assignment always wins for new RGs.'
+    policyType: 'Custom'
+    metadata: {
+      category: 'Tags'
+      version: '1.0.0'
+      source: 'azure-tagging-policy-demo'
+      owner: '${organizationName} Cloud Governance'
+    }
+    policyDefinitions: defaultPolicyRefs
+  }
+}
+
+// -------- Assignment (enforcement) --------
 
 var tagListForMessage = join(tagsToEnforce, ', ')
 
@@ -371,7 +396,23 @@ resource assignment 'Microsoft.Authorization/policyAssignments@2023-04-01' = {
   }
 }
 
-// -------- Role assignment for Modify remediation --------
+// -------- Assignment (remediation defaults — DoNotEnforce) --------
+
+resource assignmentDefaults 'Microsoft.Authorization/policyAssignments@2023-04-01' = if (!empty(tagDefaults)) {
+  name: 'demo-rg-tagging-defaults'
+  location: assignmentLocation
+  identity: {
+    type: 'SystemAssigned'
+  }
+  properties: {
+    displayName: '${organizationName} - RG Tagging Defaults (Remediation Only)'
+    description: 'Provides remediation back-fill for existing RGs missing required tags. enforcementMode=DoNotEnforce so new RG creates are NOT silently auto-tagged — the deny on the main assignment still rejects them. Run remediation tasks against each default-<TagName> reference to back-fill existing RGs.'
+    policyDefinitionId: initiativeDefaults.id
+    enforcementMode: 'DoNotEnforce'
+  }
+}
+
+// -------- Role assignment for Modify remediation (main assignment) --------
 // Tag Contributor (4a9ae827-6dc8-4573-8ac7-8239d42aa03f).
 // Delegated to a module so the role-assignment NAME can be computed from the
 // managed-identity principalId (a runtime value, lifted to a static module
@@ -386,11 +427,23 @@ module tagContributorRA 'modules/tagContributorRoleAssignment.mg.bicep' = {
   }
 }
 
+// -------- Role assignment for the defaults (remediation) assignment --------
+
+module tagContributorRADefaults 'modules/tagContributorRoleAssignment.mg.bicep' = if (!empty(tagDefaults)) {
+  name: 'tagContributorRoleAssignmentDefaults'
+  params: {
+    #disable-next-line BCP318
+    principalId: assignmentDefaults.identity.principalId
+  }
+}
+
 // -------- Outputs --------
 
-output requireDefId         string = requireDef.id
-output inheritDefId         string = inheritDef.id
-output defaultDefId         string = defaultDef.id
-output initiativeId         string = initiative.id
-output assignmentId         string = assignment.id
-output assignmentPrincipal  string = assignment.identity.principalId
+output requireDefId          string = requireDef.id
+output inheritDefId          string = inheritDef.id
+output defaultDefId          string = defaultDef.id
+output initiativeId          string = initiative.id
+output assignmentId          string = assignment.id
+output assignmentPrincipal   string = assignment.identity.principalId
+output defaultsInitiativeId  string = !empty(tagDefaults) ? initiativeDefaults.id : ''
+output defaultsAssignmentId  string = !empty(tagDefaults) ? assignmentDefaults.id : ''
