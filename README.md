@@ -25,9 +25,10 @@ Designed as a starter / teaching example. Bicep-first. No external files require
 
 | Resource | Name | Notes |
 | --- | --- | --- |
-| Policy definition | `demo-require-rg-tag` | Single-tag deny. Referenced N times in the initiative (one per required tag). |
-| Policy definition | `demo-inherit-tag-from-rg` | Single-tag `modify`. Referenced N times in the initiative. |
-| Initiative | `demo-rg-tagging-standard` | Bundles all `require-*` and `inherit-*` references. |
+| Policy definition | `demo-require-rg-tag` | Single-tag **deny**. Referenced once per tag in `tagsToEnforce`. Not remediable. |
+| Policy definition | `demo-inherit-tag-from-rg` | Single-tag **modify** on child resources. Referenced once per tag in `tagsToEnforce`. Remediable. |
+| Policy definition | `demo-set-default-rg-tag` | Single-tag **modify** on the RG itself. Referenced once per key in `tagDefaults` (optional). Remediable — use this to back-fill RGs that existed before the policy was assigned. |
+| Initiative | `demo-rg-tagging-standard` | Bundles all `require-*`, `inherit-*`, and `default-*` references. |
 | Assignment | `demo-rg-tagging-standard` | System-assigned identity. Per-ref non-compliance messages. |
 | Role assignment | Tag Contributor at the target scope | Granted to the assignment's managed identity so `modify` remediation can write tags. |
 
@@ -75,6 +76,14 @@ Two parameters are **required** on every deploy — there are no defaults:
 | --- | --- | --- |
 | `organizationName` | string | Used in every policy / initiative / assignment display name, description, metadata owner, and non-compliance message. Sets the prefix the user sees in the Azure portal (e.g. `Acme Corp - RG Tagging Standard (Assignment)`). |
 | `tagsToEnforce` | array | List of tag *names* that must be present (non-empty) on every RG. Each tag also gets a `Modify` rule that copies it down to child resources. |
+
+### Optional parameter — remediation defaults
+
+| Name | Type | Purpose |
+| --- | --- | --- |
+| `tagDefaults` | object | Map of tag name → default value. Any tag listed here becomes **remediable**: existing RGs missing that tag can be back-filled with the supplied value via a remediation task. Tags omitted from `tagDefaults` are deny-only (existing non-compliant RGs are flagged but you cannot remediate them automatically). |
+
+> **Why this matters:** Pure `deny` policies cannot be remediated — Azure Policy only supports remediation for `modify` and `deployIfNotExists` effects. So an existing RG that was created before the policy was assigned shows up as non-compliant with no **Create Remediation Task** button available. `tagDefaults` adds a sibling `modify` rule per tag so you can back-fill those RGs.
 
 ### Management-group scope (recommended)
 
@@ -294,11 +303,66 @@ Example (when `Environment` is missing, deployed with `organizationName='Acme Co
 
 ## Remediating existing resources
 
-The `modify` effect auto-applies to **new** child resources. To back-fill existing child resources:
+The policy pack creates **two kinds** of compliance findings against your existing estate:
 
-1. Portal → **Policy** → **Remediation**.
-2. Find the `demo-rg-tagging-standard` assignment.
-3. Create one remediation task per `inherit-<TagName>` reference — one per tag you passed in `tagsToEnforce`.
+| Finding | Source | Remediable? | What to do |
+| --- | --- | --- | --- |
+| RG is missing required tag | `require-<TagName>` (deny) | ❌ No (deny effect) | Either edit the RG by hand to add the tag, **or** also supply `tagDefaults` at deploy time and run a remediation task against the matching `default-<TagName>` reference. |
+| Child resource is missing a tag the RG has | `inherit-<TagName>` (modify) | ✅ Yes | Run a remediation task against the `inherit-<TagName>` reference. |
+| RG is missing a tag listed in `tagDefaults` | `default-<TagName>` (modify) | ✅ Yes | Run a remediation task against the `default-<TagName>` reference — the RG will be tagged with the value you supplied in `tagDefaults`. |
+
+### Deploy with defaults to back-fill existing RGs
+
+```bash
+az deployment mg create \
+  --name tagging-demo \
+  --management-group-id <your-management-group-id> \
+  --location eastus2 \
+  --template-file main.bicep \
+  --parameters organizationName='Acme Corp' \
+               tagsToEnforce='["Environment","CostCenter","Owner","Application"]' \
+               tagDefaults='{"Environment":"unknown","CostCenter":"CC-0000","Owner":"unassigned@example.com","Application":"unassigned"}'
+```
+
+> Only the keys present in `tagDefaults` get a `default-*` reference in the initiative. Keys can be a subset of `tagsToEnforce` if you only want to back-fill some of the required tags.
+
+### Trigger the remediation task
+
+**Portal (easiest):**
+
+1. **Policy → Remediation → Create remediation task**
+2. Pick the `demo-rg-tagging-standard` assignment
+3. Choose a `default-<TagName>` reference (e.g. `default-Environment`)
+4. Scope to the management group or subscription you want to back-fill
+5. Repeat per tag (and per `inherit-<TagName>` reference if you also want child-resource back-fill)
+
+**CLI:**
+
+```bash
+# Back-fill the 'Environment' tag on every non-compliant RG under the MG
+az policy remediation create \
+  --name remediate-default-Environment \
+  --management-group mg-demo-group \
+  --policy-assignment demo-rg-tagging-standard \
+  --definition-reference-id default-Environment \
+  --resource-discovery-mode ExistingNonCompliant
+
+# Watch progress
+az policy remediation show \
+  --name remediate-default-Environment \
+  --management-group mg-demo-group
+```
+
+`--resource-discovery-mode ExistingNonCompliant` only touches resources already evaluated as non-compliant (fast). Use `ReEvaluateCompliance` if you suspect the compliance picture is stale.
+
+### Heads-up on Modify + RG-level deny interaction
+
+When you deploy with both `require-<TagName>` (deny) and `default-<TagName>` (modify) for the same tag:
+
+- **Create / update** of an RG without the tag still gets **denied** at the request layer — modify doesn't pre-empt deny, the deny condition matches first. So users see the rejection message and have to provide the tag themselves on new RGs.
+- **Existing** RGs missing the tag stay marked non-compliant, but a remediation task against the `default-*` reference will silently add the default value (no deny happens during a policy-triggered modify operation).
+
+This is the intended Azure Policy behavior — your standards stay enforced at create-time, while back-fill of legacy RGs is opt-in via `tagDefaults`.
 
 ## Cleanup
 
@@ -316,6 +380,8 @@ az policy definition delete --name demo-require-rg-tag `
   --management-group <your-management-group-id>
 az policy definition delete --name demo-inherit-tag-from-rg `
   --management-group <your-management-group-id>
+az policy definition delete --name demo-set-default-rg-tag `
+  --management-group <your-management-group-id>
 ```
 
 ## Known gotchas
@@ -329,7 +395,8 @@ az policy definition delete --name demo-inherit-tag-from-rg `
     --query "[?principalId!='<current-pid>'].id" -o tsv | `
     ForEach-Object { az role assignment delete --ids $_ }
   ```
-- **Modify mode is `Indexed`**, so non-taggable / proxy resource types are not evaluated. This matches Microsoft's own "Inherit tag from RG" built-in policies.
+- **Modify mode is `Indexed`**, so non-taggable / proxy resource types are not evaluated. This matches Microsoft's own "Inherit tag from RG" built-in policies. The `demo-set-default-rg-tag` definition uses mode `All` because RGs themselves are not in the indexed scope.
+- **Deny policies cannot be remediated.** That's why `tagDefaults` exists — it adds a sibling `modify` policy per tag so existing non-compliant RGs can be back-filled. See [Remediating existing resources](#remediating-existing-resources).
 - **Initiative param passthrough** (`[parameters('x')]` inside a policy ref) is fragile when authored from Bicep — the value gets baked at deploy time. This template intentionally bakes effects at deploy time and does not expose initiative-level effect parameters. To change effects, redeploy with different parameter values.
 
 ## License
