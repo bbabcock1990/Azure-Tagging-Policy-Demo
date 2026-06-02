@@ -44,12 +44,15 @@ param inheritEffect string = 'modify'
 @description('Region used to host the assignment\'s system-assigned managed identity.')
 param assignmentLocation string = 'eastus2'
 
+@description('Organization or customer name shown in every policy / initiative / assignment display string and in the non-compliance message. Lets you rebrand the demo without editing the template.')
+param organizationName string = 'Contoso'
+
 // -------- Policy definition: deny when a single named tag is missing on the RG --------
 
 resource requireDef 'Microsoft.Authorization/policyDefinitions@2023-04-01' = {
   name: 'demo-require-rg-tag'
   properties: {
-    displayName: 'Require a specified tag on resource groups'
+    displayName: '${organizationName} - Require a specified tag on resource groups'
     description: 'Denies the creation or update of a resource group unless the specified tag is present with a non-empty value.'
     policyType: 'Custom'
     mode: 'All'
@@ -57,6 +60,7 @@ resource requireDef 'Microsoft.Authorization/policyDefinitions@2023-04-01' = {
       category: 'Tags'
       version: '1.0.0'
       source: 'azure-tagging-policy-demo'
+      owner: '${organizationName} Cloud Governance'
     }
     parameters: {
       tagName: {
@@ -113,7 +117,7 @@ resource requireDef 'Microsoft.Authorization/policyDefinitions@2023-04-01' = {
 resource inheritDef 'Microsoft.Authorization/policyDefinitions@2023-04-01' = {
   name: 'demo-inherit-tag-from-rg'
   properties: {
-    displayName: 'Inherit a tag from the resource group if missing'
+    displayName: '${organizationName} - Inherit a tag from the resource group if missing'
     description: 'Adds the specified tag with its value from the parent resource group when a resource is missing this tag. Can be combined with a remediation task to back-fill existing resources.'
     policyType: 'Custom'
     mode: 'Indexed'
@@ -121,6 +125,7 @@ resource inheritDef 'Microsoft.Authorization/policyDefinitions@2023-04-01' = {
       category: 'Tags'
       version: '1.0.0'
       source: 'azure-tagging-policy-demo'
+      owner: '${organizationName} Cloud Governance'
     }
     parameters: {
       tagName: {
@@ -207,13 +212,14 @@ var inheritPolicyRefs = [for tagName in tagsToEnforce: {
 resource initiative 'Microsoft.Authorization/policySetDefinitions@2023-04-01' = {
   name: 'demo-rg-tagging-standard'
   properties: {
-    displayName: 'Resource Group Tagging Standard (Demo)'
+    displayName: '${organizationName} - Resource Group Tagging Standard'
     description: 'Enforces required RG tags AND propagates them to children.'
     policyType: 'Custom'
     metadata: {
       category: 'Tags'
       version: '1.0.0'
       source: 'azure-tagging-policy-demo'
+      owner: '${organizationName} Cloud Governance'
     }
     policyDefinitions: concat(denyPolicyRefs, inheritPolicyRefs)
   }
@@ -230,12 +236,12 @@ resource assignment 'Microsoft.Authorization/policyAssignments@2023-04-01' = {
     type: 'SystemAssigned'
   }
   properties: {
-    displayName: 'Resource Group Tagging Standard (Demo) - Assignment'
-    description: 'Enforces the Resource Group Tagging Standard (Demo) initiative.'
+    displayName: '${organizationName} - RG Tagging Standard (Assignment)'
+    description: 'Enforces the ${organizationName} RG Tagging Standard initiative.'
     policyDefinitionId: initiative.id
     enforcementMode: 'Default'
     nonComplianceMessages: [for tagName in tagsToEnforce: {
-      message: 'This resource group is missing the required tag \'${tagName}\'. Every RG must carry these tags with non-empty values: ${tagListForMessage}. Add the missing tag(s) and retry. Child resources will inherit these tags automatically.'
+      message: '${organizationName} Governance: This resource group is missing the required tag \'${tagName}\'. Every RG must carry these tags with non-empty values: ${tagListForMessage}. Add the missing tag(s) and retry. Child resources will inherit these tags automatically.'
       policyDefinitionReferenceId: 'require-${tagName}'
     }]
   }

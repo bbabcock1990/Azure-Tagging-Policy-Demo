@@ -109,6 +109,19 @@ az deployment mg create `
 
 > The deny **and** inherit references are generated from the same `tagsToEnforce` array, so the deny side and propagation side never drift out of sync.
 
+### Rebrand for a specific organization
+
+Every display name, description, metadata owner, and non-compliance message is templated on a single `organizationName` parameter (default: `Contoso`). Override it at deploy time so the assignment shows up as e.g. `"Acme Corp - RG Tagging Standard (Assignment)"` in the Portal:
+
+```powershell
+az deployment mg create `
+  --name tagging-demo `
+  --management-group-id <your-management-group-id> `
+  --location eastus2 `
+  --template-file main.bicep `
+  --parameters organizationName='Acme Corp'
+```
+
 ### Soft rollout (audit, not deny)
 
 ```powershell
