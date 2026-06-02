@@ -1,0 +1,17 @@
+# Bicep compile artifacts
+main.json
+main.sub.json
+*.compiled.json
+
+# Local environment files
+.env
+*.local
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
