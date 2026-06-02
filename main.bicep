@@ -36,7 +36,7 @@ targetScope = 'managementGroup'
 @minLength(1)
 param tagsToEnforce array
 
-@description('Optional map of tag name -> default value. Tags listed here become remediable: existing RGs missing the tag will have it added with the given value via a Modify policy + remediation task. Tags in tagsToEnforce but not in this map are deny-only. Tags listed here that are not in tagsToEnforce are still defaulted but are not enforced by the deny rule.')
+@description('Optional map of tag name -> default value used to back-fill missing tags on existing RGs via a remediation task. IMPORTANT: to make remediation work end-to-end, this map should include EVERY tag listed in tagsToEnforce — otherwise the deny rule will reject the remediation PATCH because some required tags will still be missing post-PATCH. Leave empty ({}) to skip the defaults assignment entirely. The Modify policy uses operation \'add\', which is a no-op on tags that already exist (existing non-empty values are preserved).')
 param tagDefaults object = {}
 
 @description('Effect for the deny-on-missing-tag policy. Use deny in production, audit for a soft rollout.')
@@ -55,7 +55,7 @@ param denyEffect string = 'deny'
 ])
 param inheritEffect string = 'modify'
 
-@description('Effect for the per-tag set-default-on-RG policy. modify auto-applies the default value when remediated; audit only reports.')
+@description('Effect for the consolidated set-defaults-on-RG policy. modify auto-applies all configured defaults during remediation; audit only reports; disabled skips.')
 @allowed([
   'modify'
   'audit'
@@ -204,41 +204,58 @@ resource inheritDef 'Microsoft.Authorization/policyDefinitions@2023-04-01' = {
   }
 }
 
-// -------- Policy definition: set a default value on the RG when a tag is missing --------
+// -------- Policy definition: set default values for ALL configured RG tags in ONE PATCH --------
+// Why this is consolidated into a single multi-operation Modify policy (instead of N single-tag
+// policies bundled in the initiative):
+//
+//   The companion deny policy (require-<TagName>) rejects any write to an RG that leaves
+//   ANY required tag missing or empty. The remediation engine PATCHes RGs to apply Modify
+//   operations. If we had N single-tag default policies, each PATCH would add only ONE tag,
+//   leaving the other required tags still missing — the deny rule would reject every such
+//   PATCH (HTTP 403 Forbidden, "missing required tag X").
+//
+//   By emitting ALL default-tag operations in a single Modify policy, one remediation PATCH
+//   adds all missing default tags atomically. Post-PATCH the RG has every required tag
+//   present, the deny re-evaluation passes, and the remediation succeeds.
+//
+// Why operation \'add\' (not \'addOrReplace\'):
+//   \'add\' is a no-op when the tag already exists, so we never clobber tag values an owner
+//   has set intentionally. The trade-off: tags present with empty string values are not
+//   remediated (operation conditions don\'t support field(), per the Modify effect docs,
+//   so we can\'t selectively addOrReplace only the empty ones without overwriting valid
+//   neighbors). Manual fix-up is required for empty-string tags — they\'re an edge case;
+//   missing-tag remediation is the 99% scenario.
 
-resource defaultDef 'Microsoft.Authorization/policyDefinitions@2023-04-01' = {
-  name: 'demo-set-default-rg-tag'
+var defaultMissingChecks = [for item in items(tagDefaults): {
+  field: 'tags[\'${item.key}\']'
+  exists: 'false'
+}]
+
+var defaultAddOperations = [for item in items(tagDefaults): {
+  operation: 'add'
+  field: 'tags[\'${item.key}\']'
+  value: item.value
+}]
+
+resource defaultDef 'Microsoft.Authorization/policyDefinitions@2023-04-01' = if (!empty(tagDefaults)) {
+  name: 'demo-set-default-rg-tags'
   properties: {
-    displayName: '${organizationName} - Set a default value for a tag on resource groups'
-    description: 'If the specified tag is missing or empty on a resource group, adds it with the supplied default value. This is the remediable counterpart to the deny rule — run a remediation task to back-fill RGs that existed before the policy was assigned.'
+    displayName: '${organizationName} - Set default values for missing RG tags (multi-tag)'
+    description: 'When a resource group is missing any of the configured default tags, adds them ALL in a SINGLE PATCH. The single-PATCH design is required so the companion deny rule (which checks for ALL required tags) does not block the remediation engine. Uses operation \'add\', so existing non-empty tag values are preserved — only truly missing tags are populated.'
     policyType: 'Custom'
     mode: 'All'
     metadata: {
       category: 'Tags'
-      version: '1.0.0'
+      version: '2.0.0'
       source: 'azure-tagging-policy-demo'
       owner: '${organizationName} Cloud Governance'
     }
     parameters: {
-      tagName: {
-        type: 'String'
-        metadata: {
-          displayName: 'Tag Name'
-          description: 'Name of the tag to default on the resource group.'
-        }
-      }
-      tagValue: {
-        type: 'String'
-        metadata: {
-          displayName: 'Tag Value'
-          description: 'Default value applied to the tag when the RG is missing it.'
-        }
-      }
       effect: {
         type: 'String'
         metadata: {
           displayName: 'Effect'
-          description: 'modify auto-applies the default during remediation; audit only reports.'
+          description: 'modify auto-applies the defaults during remediation; audit only reports; disabled skips.'
         }
         allowedValues: [
           'modify'
@@ -256,16 +273,7 @@ resource defaultDef 'Microsoft.Authorization/policyDefinitions@2023-04-01' = {
             equals: 'Microsoft.Resources/subscriptions/resourceGroups'
           }
           {
-            anyOf: [
-              {
-                field: '[concat(\'tags[\', parameters(\'tagName\'), \']\')]'
-                exists: 'false'
-              }
-              {
-                field: '[concat(\'tags[\', parameters(\'tagName\'), \']\')]'
-                equals: ''
-              }
-            ]
+            anyOf: defaultMissingChecks
           }
         ]
       }
@@ -276,13 +284,7 @@ resource defaultDef 'Microsoft.Authorization/policyDefinitions@2023-04-01' = {
             '/providers/microsoft.authorization/roleDefinitions/4a9ae827-6dc8-4573-8ac7-8239d42aa03f'
           ]
           conflictEffect: 'audit'
-          operations: [
-            {
-              operation: 'addOrReplace'
-              field: '[concat(\'tags[\', parameters(\'tagName\'), \']\')]'
-              value: '[parameters(\'tagValue\')]'
-            }
-          ]
+          operations: defaultAddOperations
         }
       }
     }
@@ -317,21 +319,28 @@ var inheritPolicyRefs = [for tagName in tagsToEnforce: {
   }
 }]
 
-var defaultPolicyRefs = [for item in items(tagDefaults): {
-  policyDefinitionReferenceId: 'default-${item.key}'
-  policyDefinitionId: defaultDef.id
-  parameters: {
-    tagName: {
-      value: item.key
-    }
-    tagValue: {
-      value: item.value
-    }
-    effect: {
-      value: defaultEffect
+// Single reference into the consolidated multi-tag default policy. The defaults initiative
+// has exactly one policy reference (`default-rg-tags`), and remediation tasks target this
+// reference ID. One task patches every missing default tag on every non-compliant RG.
+var defaultPolicyRefs = !empty(tagDefaults) ? [
+  {
+    policyDefinitionReferenceId: 'default-rg-tags'
+    #disable-next-line BCP318
+    policyDefinitionId: defaultDef.id
+    parameters: {
+      effect: {
+        value: defaultEffect
+      }
     }
   }
-}]
+] : []
+
+// Validation: when tagDefaults is non-empty, it must cover every tag in tagsToEnforce.
+// Otherwise the remediation PATCH will be rejected by the deny rule because some required
+// tags will still be missing post-PATCH. We emit this as a deploy-time output so a
+// misconfiguration is loud and discoverable.
+var _missingDefaultsForRequiredTags = empty(tagDefaults) ? [] : filter(tagsToEnforce, t => !contains(tagDefaults, t))
+var _missingDefaultsList = join(_missingDefaultsForRequiredTags, ', ')
 
 resource initiative 'Microsoft.Authorization/policySetDefinitions@2023-04-01' = {
   name: 'demo-rg-tagging-standard'
@@ -441,9 +450,15 @@ module tagContributorRADefaults 'modules/tagContributorRoleAssignment.mg.bicep' 
 
 output requireDefId          string = requireDef.id
 output inheritDefId          string = inheritDef.id
-output defaultDefId          string = defaultDef.id
+#disable-next-line BCP318
+output defaultDefId          string = !empty(tagDefaults) ? defaultDef.id : ''
 output initiativeId          string = initiative.id
 output assignmentId          string = assignment.id
 output assignmentPrincipal   string = assignment.identity.principalId
 output defaultsInitiativeId  string = !empty(tagDefaults) ? initiativeDefaults.id : ''
 output defaultsAssignmentId  string = !empty(tagDefaults) ? assignmentDefaults.id : ''
+output defaultsCoverageStatus string = empty(tagDefaults)
+  ? 'OK: tagDefaults not supplied — defaults assignment skipped.'
+  : empty(_missingDefaultsForRequiredTags)
+    ? 'OK: tagDefaults covers every tag in tagsToEnforce — remediation will succeed.'
+    : 'WARNING: tagDefaults does NOT cover every tag in tagsToEnforce. Remediation tasks will FAIL because the deny rule will reject the PATCH when these tags remain missing post-remediation: ${_missingDefaultsList}. Add defaults for these tags and redeploy.'

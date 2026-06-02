@@ -27,11 +27,11 @@ Designed as a starter / teaching example. Bicep-first. No external files require
 | --- | --- | --- |
 | Policy definition | `demo-require-rg-tag` | Single-tag **deny**. Referenced once per tag in `tagsToEnforce`. Not remediable. |
 | Policy definition | `demo-inherit-tag-from-rg` | Single-tag **modify** on child resources. Referenced once per tag in `tagsToEnforce`. Remediable. |
-| Policy definition | `demo-set-default-rg-tag` | Single-tag **modify** on the RG itself. Referenced once per key in `tagDefaults` (optional). Remediable — use this to back-fill RGs that existed before the policy was assigned. |
+| Policy definition | `demo-set-default-rg-tags` *(only if `tagDefaults` is supplied)* | Multi-tag **modify** on the RG itself. Bakes one operation per key in `tagDefaults` so a single PATCH adds every missing default tag atomically (see [Remediating existing resources](#remediating-existing-resources) for the why). Uses operation `add`, so existing non-empty tag values are NEVER overwritten. |
 | Initiative | `demo-rg-tagging-standard` | Bundles all `require-*` and `inherit-*` references. Enforces deny + propagation at request time. |
-| Initiative | `demo-rg-tagging-defaults` *(only if `tagDefaults` is supplied)* | Bundles all `default-*` references. Used for remediation only. |
+| Initiative | `demo-rg-tagging-defaults` *(only if `tagDefaults` is supplied)* | Contains exactly ONE reference (`default-rg-tags`) to the multi-tag defaults policy. Used for remediation only. |
 | Assignment | `demo-rg-tagging-standard` (`enforcementMode: Default`) | System-assigned identity. Per-ref non-compliance messages on each `require-*`. |
-| Assignment | `demo-rg-tagging-defaults` (`enforcementMode: DoNotEnforce`) *(only if `tagDefaults` is supplied)* | System-assigned identity. Does NOT mutate request-time — deny on the main assignment still wins. Remediation tasks back-fill missing tags on existing RGs. |
+| Assignment | `demo-rg-tagging-defaults` (`enforcementMode: DoNotEnforce`) *(only if `tagDefaults` is supplied)* | System-assigned identity. Does NOT mutate request-time — deny on the main assignment still wins. Run ONE remediation task against the `default-rg-tags` reference to back-fill missing tags on existing RGs. |
 | Role assignment | Tag Contributor at the target scope | Granted to each assignment's managed identity so `modify` remediation can write tags. |
 
 ## Sample tag schema
@@ -83,9 +83,9 @@ Two parameters are **required** on every deploy — there are no defaults:
 
 | Name | Type | Purpose |
 | --- | --- | --- |
-| `tagDefaults` | object | Map of tag name → default value. Any tag listed here becomes **remediable**: existing RGs missing that tag can be back-filled with the supplied value via a remediation task. Tags omitted from `tagDefaults` are deny-only (existing non-compliant RGs are flagged but you cannot remediate them automatically). |
+| `tagDefaults` | object | Map of tag name → default value used to back-fill existing RGs that are missing required tags. Supply one entry **per tag in `tagsToEnforce`** (see [Remediating existing resources](#remediating-existing-resources) for why coverage matters). Leave empty (`{}`) to skip the defaults assignment entirely — the deny rule still flags non-compliant RGs but you'll have to add tags manually. The defaults policy uses operation `add`, so existing non-empty tag values are NEVER overwritten. |
 
-> **Why this matters:** Pure `deny` policies cannot be remediated — Azure Policy only supports remediation for `modify` and `deployIfNotExists` effects. So an existing RG that was created before the policy was assigned shows up as non-compliant with no **Create Remediation Task** button available. `tagDefaults` adds a sibling `modify` rule per tag so you can back-fill those RGs.
+> **Why this matters:** Pure `deny` policies cannot be remediated — Azure Policy only supports remediation for `modify` and `deployIfNotExists` effects. So an existing RG that was created before the policy was assigned shows up as non-compliant with no **Create Remediation Task** button available. `tagDefaults` adds a sibling multi-tag `modify` policy (`default-rg-tags`) in a separate `DoNotEnforce` assignment so you can back-fill those RGs in a single PATCH per RG.
 
 ### Management-group scope (recommended)
 
@@ -309,11 +309,23 @@ The policy pack creates **three kinds** of compliance findings against your exis
 
 | Finding | Source | Assignment | Remediable? | What to do |
 | --- | --- | --- | --- | --- |
-| RG is missing required tag | `require-<TagName>` (deny) | `demo-rg-tagging-standard` | ❌ No (deny effect) | Either edit the RG by hand to add the tag, **or** also supply `tagDefaults` at deploy time and run a remediation task against the matching `default-<TagName>` reference. |
+| RG is missing a required tag | `require-<TagName>` (deny) | `demo-rg-tagging-standard` | ❌ No (deny effect) | Either edit the RG by hand to add the tag, **or** supply `tagDefaults` at deploy time and run the single `default-rg-tags` remediation task (see below). |
 | Child resource is missing a tag the RG has | `inherit-<TagName>` (modify) | `demo-rg-tagging-standard` | ✅ Yes | Run a remediation task against the `inherit-<TagName>` reference. |
-| RG is missing a tag listed in `tagDefaults` | `default-<TagName>` (modify) | `demo-rg-tagging-defaults` *(separate)* | ✅ Yes | Run a remediation task against the `default-<TagName>` reference — the RG will be tagged with the value you supplied in `tagDefaults`. |
+| RG is missing one or more tags listed in `tagDefaults` | `default-rg-tags` (multi-tag modify) | `demo-rg-tagging-defaults` *(separate)* | ✅ Yes | Run **ONE** remediation task against `default-rg-tags` — the single PATCH adds **every** missing default tag at once. |
 
-> The `default-*` policies live in a **separate** assignment (`demo-rg-tagging-defaults`) with `enforcementMode: DoNotEnforce`. See the [How defaults and deny coexist](#how-defaults-and-deny-coexist) section below for why.
+> The `default-*` policy lives in a **separate** assignment (`demo-rg-tagging-defaults`) with `enforcementMode: DoNotEnforce`. See [How defaults and deny coexist](#how-defaults-and-deny-coexist) below for why.
+
+### ⚠️ `tagDefaults` must cover EVERY tag in `tagsToEnforce`
+
+If you supply `tagDefaults` for only some of the tags in `tagsToEnforce`, **remediation will fail** with `403 Forbidden`. The Modify PATCH adds only the tags you defaulted; the deny rule then re-evaluates the post-PATCH RG, sees the other required tags still missing, and rejects the entire PATCH.
+
+The Bicep template emits a `defaultsCoverageStatus` output that flags this misconfiguration loudly:
+
+```bash
+az deployment mg show --name <deployment-name> --query "properties.outputs.defaultsCoverageStatus.value" -o tsv
+# OK: tagDefaults covers every tag in tagsToEnforce — remediation will succeed.
+# (or a WARNING listing the missing default values)
+```
 
 ### Deploy with defaults to back-fill existing RGs
 
@@ -328,47 +340,55 @@ az deployment mg create \
                tagDefaults='{"Environment":"unknown","CostCenter":"CC-0000","Owner":"unassigned@example.com","Application":"unassigned"}'
 ```
 
-> Only the keys present in `tagDefaults` get a `default-*` reference. Keys can be a subset of `tagsToEnforce` if you only want to back-fill some of the required tags.
+> Every key in `tagsToEnforce` should have a matching entry in `tagDefaults` (same names, your choice of values). Extra keys in `tagDefaults` not in `tagsToEnforce` are also fine — they're tagged but not enforced.
 
-### Trigger the remediation task
+### Trigger the remediation task — ONE task patches ALL missing tags
 
 **Portal (easiest):**
 
 1. **Policy → Remediation → Create remediation task**
 2. Pick the **`demo-rg-tagging-defaults`** assignment (NOT the `-standard` one — defaults live in their own assignment)
-3. Choose a `default-<TagName>` reference (e.g. `default-Environment`)
+3. Choose the **`default-rg-tags`** reference (there is only one — it's the multi-tag policy)
 4. Scope to the management group or subscription you want to back-fill
-5. Repeat per tag
+5. Run it. The single PATCH on each non-compliant RG adds every missing default tag at once.
 
 **CLI:**
 
 ```bash
-# Back-fill the 'Environment' tag on every non-compliant RG under the MG
+# Back-fill all default tags on every non-compliant RG under the MG (one task does it all)
 az policy remediation create \
-  --name remediate-default-Environment \
+  --name remediate-default-rg-tags \
   --management-group mg-demo-group \
   --policy-assignment demo-rg-tagging-defaults \
-  --definition-reference-id default-Environment \
+  --definition-reference-id default-rg-tags \
   --resource-discovery-mode ExistingNonCompliant
 
 # Watch progress
 az policy remediation show \
-  --name remediate-default-Environment \
+  --name remediate-default-rg-tags \
   --management-group mg-demo-group
 ```
 
 `--resource-discovery-mode ExistingNonCompliant` only touches resources already evaluated as non-compliant (fast). Use `ReEvaluateCompliance` if you suspect the compliance picture is stale.
 
+### Why one multi-tag policy (not N single-tag policies)
+
+The companion deny rule blocks any write to an RG that leaves **any** required tag missing. The remediation engine PATCHes RGs to apply Modify operations. If we had N single-tag default policies, each remediation PATCH would add only ONE tag — leaving the other required tags still missing — and the deny rule would reject every such PATCH with `403 Forbidden, missing required tag X`. We hit exactly this failure mode in an earlier iteration and consolidated.
+
+A single multi-operation Modify policy sidesteps this: one PATCH adds every missing default tag atomically. Post-PATCH the RG has every required tag, the deny re-evaluation passes, and remediation succeeds.
+
+The trade-off: the policy uses operation `add` (not `addOrReplace`), so it's a no-op when the tag already exists — existing non-empty values are never clobbered. The flip side is that **tags present with an empty-string value** are not remediated by this design (Azure Policy doesn't allow `field()` in operation conditions, so we can't selectively `addOrReplace` only the empty ones without overwriting valid neighbors). Empty-string tags are an edge case in practice; manual fix-up is required if you hit them.
+
 ### How defaults and deny coexist
 
-Azure Policy evaluates effects in this order at **request time**: `Disabled → Append/Modify → Audit → Deny`. If we bundled `default-*` (modify) into the same assignment as `require-*` (deny), the modify would fire first and silently inject the default tag into a brand-new RG-create request — **the deny would never reject it**. That defeats the whole point of the deny.
+Azure Policy evaluates effects in this order at **request time**: `Disabled → Append/Modify → Audit → Deny`. If we bundled the default-`*` modify into the same assignment as `require-*` deny, the modify would fire first and silently inject the default tag into a brand-new RG-create request — **the deny would never reject it**. That defeats the whole point of the deny.
 
-To prevent that, the `default-*` policies live in a **separate assignment** (`demo-rg-tagging-defaults`) with **`enforcementMode: 'DoNotEnforce'`**:
+To prevent that, the `default-rg-tags` policy lives in a **separate assignment** (`demo-rg-tagging-defaults`) with **`enforcementMode: 'DoNotEnforce'`**:
 
 | Scenario | What happens |
 | --- | --- |
 | `az group create` with no tags | Main assignment's deny fires and rejects the request. The defaults assignment's modify is **skipped** (DoNotEnforce). The user sees the rejection message and must supply tags themselves. |
-| Existing RG missing the tag | Both assignments mark it non-compliant. Manual remediation task against `default-<TagName>` (on the defaults assignment) back-fills the tag — DoNotEnforce does NOT block remediation tasks, only request-time enforcement. |
+| Existing RG missing the tag | Both assignments mark it non-compliant. Manual remediation task against `default-rg-tags` (on the defaults assignment) back-fills every missing default in a single PATCH — DoNotEnforce does NOT block remediation tasks, only request-time enforcement. |
 
 This is the only way to get "deny wins on create, but I can still remediate existing RGs" — Azure Policy doesn't expose per-reference enforcement overrides, so two assignments are required.
 
@@ -394,8 +414,14 @@ az policy definition delete --name demo-require-rg-tag \
   --management-group $MG
 az policy definition delete --name demo-inherit-tag-from-rg \
   --management-group $MG
-az policy definition delete --name demo-set-default-rg-tag \
+az policy definition delete --name demo-set-default-rg-tags \
   --management-group $MG
+
+# If you previously deployed an older single-tag default policy named
+# 'demo-set-default-rg-tag' (singular), delete it manually — newer deploys
+# do not reference it and Bicep will not remove orphaned resources.
+az policy definition delete --name demo-set-default-rg-tag \
+  --management-group $MG 2>/dev/null || true
 ```
 
 ## Known gotchas
@@ -409,9 +435,11 @@ az policy definition delete --name demo-set-default-rg-tag \
     --query "[?principalId!='<current-pid>'].id" -o tsv | `
     ForEach-Object { az role assignment delete --ids $_ }
   ```
-- **Modify mode is `Indexed`**, so non-taggable / proxy resource types are not evaluated. This matches Microsoft's own "Inherit tag from RG" built-in policies. The `demo-set-default-rg-tag` definition uses mode `All` because RGs themselves are not in the indexed scope.
-- **Deny policies cannot be remediated.** That's why `tagDefaults` exists — it adds a sibling `modify` policy per tag so existing non-compliant RGs can be back-filled. See [Remediating existing resources](#remediating-existing-resources).
-- **Modify-before-Deny precedence.** This is the reason `default-*` policies live in a separate `DoNotEnforce` assignment, not bundled with the deny initiative. Bundling them would let modify silently auto-tag new RGs and bypass the deny rule. See [How defaults and deny coexist](#how-defaults-and-deny-coexist).
+- **Modify mode is `Indexed`**, so non-taggable / proxy resource types are not evaluated. This matches Microsoft's own "Inherit tag from RG" built-in policies. The `demo-set-default-rg-tags` definition uses mode `All` because RGs themselves are not in the indexed scope.
+- **Deny policies cannot be remediated.** That's why `tagDefaults` exists — it adds a sibling multi-tag `modify` policy so existing non-compliant RGs can be back-filled. See [Remediating existing resources](#remediating-existing-resources).
+- **Modify-before-Deny precedence.** This is the reason `default-rg-tags` lives in a separate `DoNotEnforce` assignment, not bundled with the deny initiative. Bundling them would let modify silently auto-tag new RGs and bypass the deny rule. See [How defaults and deny coexist](#how-defaults-and-deny-coexist).
+- **Deny rule blocks remediation PATCHes too.** If you deploy `tagDefaults` for only some of `tagsToEnforce`, remediation will fail with `403 Forbidden, missing required tag X` because the deny rule re-evaluates after the PATCH and sees other required tags still missing. The single multi-tag defaults policy + the deploy-time `defaultsCoverageStatus` output guard against this — make sure `tagDefaults` covers every tag in `tagsToEnforce`.
+- **Empty-string tag values are not remediated.** The defaults policy uses operation `add` (not `addOrReplace`) so existing non-empty values are never overwritten — but `add` is also a no-op when the tag exists with an empty value. Manual fix-up is required for RGs with `Tag=""`. Operation-level conditions in Azure Policy can't use `field()`, so there's no way to selectively `addOrReplace` only the empty-valued tags without risking overwriting neighbors.
 - **Initiative param passthrough** (`[parameters('x')]` inside a policy ref) is fragile when authored from Bicep — the value gets baked at deploy time. This template intentionally bakes effects at deploy time and does not expose initiative-level effect parameters. To change effects, redeploy with different parameter values.
 
 ## License
