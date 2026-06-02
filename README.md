@@ -65,6 +65,15 @@ az login
 az bicep upgrade
 ```
 
+### Required parameters
+
+Two parameters are **required** on every deploy — there are no defaults:
+
+| Name | Type | Purpose |
+| --- | --- | --- |
+| `organizationName` | string | Used in every policy / initiative / assignment display name, description, metadata owner, and non-compliance message. Sets the prefix the user sees in the Azure portal (e.g. `Acme Corp - RG Tagging Standard (Assignment)`). |
+| `tagsToEnforce` | array | List of tag *names* that must be present (non-empty) on every RG. Each tag also gets a `Modify` rule that copies it down to child resources. |
+
 ### Management-group scope (recommended)
 
 ```powershell
@@ -72,7 +81,9 @@ az deployment mg create `
   --name tagging-demo `
   --management-group-id <your-management-group-id> `
   --location eastus2 `
-  --template-file main.bicep
+  --template-file main.bicep `
+  --parameters organizationName='Acme Corp' `
+               tagsToEnforce='[\"Environment\",\"CostCenter\",\"Owner\",\"Application\"]'
 ```
 
 ### Subscription scope
@@ -82,7 +93,9 @@ az deployment sub create `
   --name tagging-demo `
   --subscription <subscriptionId> `
   --location eastus2 `
-  --template-file main.sub.bicep
+  --template-file main.sub.bicep `
+  --parameters organizationName='Acme Corp' `
+               tagsToEnforce='[\"Environment\",\"CostCenter\",\"Owner\",\"Application\"]'
 ```
 
 ### What-if (preview before deploying)
@@ -91,27 +104,30 @@ az deployment sub create `
 az deployment mg what-if `
   --management-group-id <your-management-group-id> `
   --location eastus2 `
-  --template-file main.bicep
+  --template-file main.bicep `
+  --parameters organizationName='Acme Corp' `
+               tagsToEnforce='[\"Environment\",\"CostCenter\",\"Owner\"]'
 ```
 
 ## Customize
 
 ### Different required tags
 
+Pass any list of tag names. Both the deny rules and the inherit rules are generated from the same array, so the two sides never drift out of sync:
+
 ```powershell
 az deployment mg create `
   --name tagging-demo `
   --management-group-id <your-management-group-id> `
   --location eastus2 `
   --template-file main.bicep `
-  --parameters tagsToEnforce='[\"Environment\",\"CostCenter\",\"Owner\",\"Application\",\"DataClassification\"]'
+  --parameters organizationName='Acme Corp' `
+               tagsToEnforce='[\"Environment\",\"CostCenter\",\"Owner\",\"Application\",\"DataClassification\"]'
 ```
-
-> The deny **and** inherit references are generated from the same `tagsToEnforce` array, so the deny side and propagation side never drift out of sync.
 
 ### Rebrand for a specific organization
 
-Every display name, description, metadata owner, and non-compliance message is templated on a single `organizationName` parameter (default: `Contoso`). Override it at deploy time so the assignment shows up as e.g. `"Acme Corp - RG Tagging Standard (Assignment)"` in the Portal:
+`organizationName` flows into every visible string. Override it per customer so e.g. the assignment shows up as `"Acme Corp - RG Tagging Standard (Assignment)"` and the deny message reads `"Acme Corp Governance: This resource group is missing the required tag 'Environment'..."`:
 
 ```powershell
 az deployment mg create `
@@ -119,7 +135,8 @@ az deployment mg create `
   --management-group-id <your-management-group-id> `
   --location eastus2 `
   --template-file main.bicep `
-  --parameters organizationName='Acme Corp'
+  --parameters organizationName='Acme Corp' `
+               tagsToEnforce='[\"Environment\",\"CostCenter\",\"Owner\"]'
 ```
 
 ### Soft rollout (audit, not deny)
@@ -130,7 +147,9 @@ az deployment mg create `
   --management-group-id <your-management-group-id> `
   --location eastus2 `
   --template-file main.bicep `
-  --parameters denyEffect=audit inheritEffect=audit
+  --parameters organizationName='Acme Corp' `
+               tagsToEnforce='[\"Environment\",\"CostCenter\",\"Owner\"]' `
+               denyEffect=audit inheritEffect=audit
 ```
 
 Recommended rollout path:

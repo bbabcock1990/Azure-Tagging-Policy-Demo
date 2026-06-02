@@ -17,13 +17,9 @@ targetScope = 'subscription'
 
 // -------- Parameters --------
 
-@description('Tags that must be present on every resource group. Each tag is enforced (deny on missing) and propagated to child resources (modify).')
-param tagsToEnforce array = [
-  'Environment'
-  'CostCenter'
-  'Owner'
-  'Application'
-]
+@description('Tags that must be present on every resource group. Each tag is enforced (deny on missing) and propagated to child resources (modify). Required — see README for the per-customer override example.')
+@minLength(1)
+param tagsToEnforce array
 
 @description('Effect for the deny-on-missing-tag policy. Use deny in production, audit for a soft rollout.')
 @allowed([
@@ -44,8 +40,9 @@ param inheritEffect string = 'modify'
 @description('Region used to host the assignment\'s system-assigned managed identity.')
 param assignmentLocation string = 'eastus2'
 
-@description('Organization or customer name shown in every policy / initiative / assignment display string and in the non-compliance message. Lets you rebrand the demo without editing the template.')
-param organizationName string = 'Contoso'
+@description('Organization or customer name shown in every policy / initiative / assignment display string and in the non-compliance message. Required — see README for the per-customer override example.')
+@minLength(1)
+param organizationName string
 
 // -------- Policy definition: deny when a single named tag is missing on the RG --------
 
