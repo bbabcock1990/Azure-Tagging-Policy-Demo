@@ -62,13 +62,165 @@ At the target scope you need:
 
 ### Prerequisites
 
+You can deploy this two ways:
+
+1. **From your local machine** with the Azure CLI installed — run the commands in the [CLI examples below](#management-group-scope-recommended).
+2. **From the Azure Portal Cloud Shell** — nothing to install locally, the Azure CLI and Bicep are already there. Follow the [Cloud Shell walk-through](#deploy-via-azure-cloud-shell-portal-walk-through).
+
+If you're going local:
+
 ```powershell
 # Sign in
 az login
 
-# Make sure Bicep is installed
+# Make sure Bicep is installed / up to date
 az bicep upgrade
 ```
+
+### Deploy via Azure Cloud Shell (Portal walk-through)
+
+If you'd rather not install anything locally, the Azure Portal ships a browser-based shell with `az` and Bicep already on the PATH. Here's the full path from "I have a portal login" to "policy is deployed and a remediation task is running."
+
+#### 1. Open Cloud Shell
+
+1. Sign in to <https://portal.azure.com>.
+2. Click the **`>_`** Cloud Shell icon in the top-right toolbar (next to the search bar / bell), **or** browse straight to <https://shell.azure.com>.
+3. When prompted, pick **Bash** (recommended — the rest of this walk-through uses bash quoting). You can switch later with `pwsh` / `bash`.
+4. First-run only: Cloud Shell asks you to create a small storage account for your `$HOME`. Pick any subscription and accept the defaults — it costs cents/month and persists your files across sessions.
+
+#### 2. Confirm tools
+
+The CLI and Bicep are already installed. Verify and refresh if needed:
+
+```bash
+az version                 # azure-cli should be present
+az bicep version           # bicep should be present; if not:
+az bicep install           # one-time install (Cloud Shell is read-only for some paths but this works in $HOME)
+```
+
+#### 3. Pull the repo into Cloud Shell
+
+You have two options. Pick whichever is easier:
+
+**Option A — `git clone` directly into your Cloud Shell `$HOME`** (recommended; lets you `git pull` updates later):
+
+```bash
+git clone https://github.com/bbabcock1990/Azure-Tagging-Policy-Demo.git
+cd Azure-Tagging-Policy-Demo
+ls
+# main.bicep  main.sub.bicep  modules/  README.md  LICENSE
+```
+
+**Option B — upload the files via the Cloud Shell toolbar:**
+
+1. In Cloud Shell, click the **upload/download** icon (the page-with-arrow icon in the toolbar) → **Upload**.
+2. Upload `main.bicep` (or `main.sub.bicep`) **and** the entire `modules/` folder. The Cloud Shell uploader takes one file at a time, so for `modules/` zip it locally first, upload the zip, then `unzip modules.zip` in Cloud Shell.
+3. `cd` into whichever directory you uploaded the files into.
+
+> Cloud Shell's `$HOME` is mounted from your file-share storage account, so anything you upload or clone stays put across browser sessions.
+
+#### 4. Pick your target scope and grab its ID
+
+This template is designed for management-group scope. List the MGs you have access to:
+
+```bash
+az account management-group list -o table
+# Name             DisplayName       Id
+# ---------------  ----------------  ------------------------------------------------------------
+# mg-demo-group    Demo Group        /providers/Microsoft.Management/managementGroups/mg-demo-group
+# tenant-root      Tenant Root       /providers/Microsoft.Management/managementGroups/<tenant-id>
+```
+
+The `--management-group-id` flag on the deploy command takes the short **Name** (left column), e.g. `mg-demo-group` — not the full resource ID.
+
+If you'd rather scope to a single subscription, list them with `az account list -o table` and copy the `SubscriptionId` for the [Subscription-scope command](#subscription-scope) instead.
+
+#### 5. Make sure you're targeting the right tenant / subscription
+
+```bash
+az account show -o table
+# If wrong, switch:
+az account set --subscription "<subscription-name-or-id>"
+```
+
+(Cloud Shell uses the subscription tied to your file-share by default — that may not be where you want to deploy.)
+
+#### 6. Run the deployment
+
+Replace `mg-demo-group`, `organizationName`, and the tag lists with your values. **In bash inside Cloud Shell, single-quote the JSON literally — don't escape the double quotes.** (PowerShell would need `\"…\"`; bash doesn't.)
+
+```bash
+az deployment mg create \
+  --name tagging-demo \
+  --management-group-id mg-demo-group \
+  --location eastus2 \
+  --template-file main.bicep \
+  --parameters organizationName='Acme Corp' \
+               tagsToEnforce='["Environment","CostCenter","Owner","Application"]' \
+               tagDefaults='{"Environment":"unknown","CostCenter":"CC-0000","Owner":"unassigned@example.com","Application":"unassigned"}'
+```
+
+The first deploy takes ~30-60 seconds. You'll see a JSON blob with `"provisioningState": "Succeeded"` at the end.
+
+> **Preview-first?** Replace `create` with `what-if` to see exactly which definitions, initiatives, assignments, and role assignments will be created/changed before you commit.
+
+#### 7. Verify the deployment outputs
+
+```bash
+# Coverage check — must say OK, otherwise remediation will 403
+az deployment mg show \
+  --name tagging-demo \
+  --query "properties.outputs.defaultsCoverageStatus.value" -o tsv
+# OK: tagDefaults covers every tag in tagsToEnforce — remediation will succeed.
+
+# See every output the template emitted (initiative ID, assignment ID, principal ID, etc.)
+az deployment mg show \
+  --name tagging-demo \
+  --query "properties.outputs" -o json
+```
+
+If `defaultsCoverageStatus` prints a `WARNING:` line, add the missing tag(s) to `tagDefaults` and redeploy before running remediation.
+
+#### 8. Smoke-test the deny rule
+
+```bash
+# Should be DENIED with one message per missing tag
+az group create -n rg-tagging-demo-bad -l eastus2
+
+# Should SUCCEED — child resources will inherit these tags via Modify
+az group create -n rg-tagging-demo-good -l eastus2 \
+  --tags Environment=dev CostCenter=CC-1234 Owner=cloudops@example.com Application=Billing-API
+```
+
+The deny error appears inline in the Cloud Shell output — copy/paste the message into your demo if you want to show what the end-user sees.
+
+#### 9. Back-fill existing RGs with one remediation task
+
+```bash
+az policy remediation create \
+  --name remediate-default-rg-tags \
+  --management-group mg-demo-group \
+  --policy-assignment demo-rg-tagging-defaults \
+  --definition-reference-id default-rg-tags \
+  --resource-discovery-mode ExistingNonCompliant
+
+# Watch progress
+az policy remediation show \
+  --name remediate-default-rg-tags \
+  --management-group mg-demo-group \
+  --query "{state:provisioningState, deployments:deploymentStatus}" -o json
+```
+
+`Succeeded` with a non-zero `successfulDeployments` count means existing non-compliant RGs picked up every default tag in a single PATCH. (See [Remediating existing resources](#remediating-existing-resources) for the design rationale.)
+
+#### 10. Tear it down when the demo is over
+
+Jump to the [Cleanup](#cleanup) section — every command runs in the same Cloud Shell session.
+
+> **Cloud Shell session tips:**
+> - Cloud Shell idles out after ~20 minutes of inactivity. Your files persist; you just lose any unsaved shell state.
+> - Use the **font-size** / **paste-as-plain-text** controls in the toolbar if your demo screen is being projected.
+> - The **download** option in the upload/download menu can pull the compiled `main.json` (after `az bicep build -f main.bicep`) back to your laptop if you need to attach it to a change ticket.
 
 ### Required parameters
 
