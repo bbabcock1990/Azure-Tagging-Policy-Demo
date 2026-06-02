@@ -243,14 +243,10 @@ resource assignment 'Microsoft.Authorization/policyAssignments@2023-04-01' = {
 
 // -------- Role assignment for Modify remediation --------
 
-var tagContributorRoleDefId = tenantResourceId('Microsoft.Authorization/roleDefinitions', '4a9ae827-6dc8-4573-8ac7-8239d42aa03f')
-
-resource tagContributorAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(subscription().id, assignment.id, tagContributorRoleDefId)
-  properties: {
-    roleDefinitionId: tagContributorRoleDefId
+module tagContributorRA 'modules/tagContributorRoleAssignment.sub.bicep' = {
+  name: 'tagContributorRoleAssignment'
+  params: {
     principalId: assignment.identity.principalId
-    principalType: 'ServicePrincipal'
   }
 }
 

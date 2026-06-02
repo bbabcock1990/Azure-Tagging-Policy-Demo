@@ -12,10 +12,14 @@ Designed as a starter / teaching example. Bicep-first. No external files require
 
 | File | Purpose |
 | --- | --- |
-| `main.bicep` | **Recommended.** End-to-end deployment at **management-group** scope. Self-contained. |
+| `main.bicep` | **Recommended.** End-to-end deployment at **management-group** scope. |
 | `main.sub.bicep` | End-to-end deployment at **subscription** scope. Identical resource graph. |
+| `modules/tagContributorRoleAssignment.mg.bicep` | Sub-module used by `main.bicep`. Creates the Tag Contributor role assignment for the policy assignment's managed identity at MG scope. |
+| `modules/tagContributorRoleAssignment.sub.bicep` | Sub-module used by `main.sub.bicep`. Same idea, subscription scope. |
 | `README.md` | This file. |
 | `LICENSE` | MIT license. |
+
+> Copy the **entire folder** (including `modules/`) to your dev box — `main.bicep` references the sub-module at deploy time.
 
 ## What gets deployed
 
@@ -172,7 +176,14 @@ az policy definition delete --name demo-inherit-tag-from-rg `
 ## Known gotchas
 
 - **Empty tag values** are now rejected by the deny rule (`exists:false` OR `equals:''`), so `--tags Environment=` no longer bypasses the policy.
-- **`modify` requires Tag Contributor** on the assignment's identity. This template grants it automatically; if you tear down and recreate, the deterministic role-assignment name can collide with a stale assignment — delete the orphan first.
+- **`modify` requires Tag Contributor** on the assignment's identity. This template grants it automatically. The role-assignment name is derived from the managed-identity `principalId` (lifted via a Bicep module), so if you delete and recreate the policy assignment, a **new** role assignment is created and the old one is left orphaned. Clean up orphans periodically:
+  ```powershell
+  az role assignment list `
+    --scope /providers/Microsoft.Management/managementGroups/<your-mg-id> `
+    --role "Tag Contributor" `
+    --query "[?principalId!='<current-pid>'].id" -o tsv | `
+    ForEach-Object { az role assignment delete --ids $_ }
+  ```
 - **Modify mode is `Indexed`**, so non-taggable / proxy resource types are not evaluated. This matches Microsoft's own "Inherit tag from RG" built-in policies.
 - **Initiative param passthrough** (`[parameters('x')]` inside a policy ref) is fragile when authored from Bicep — the value gets baked at deploy time. This template intentionally bakes effects at deploy time and does not expose initiative-level effect parameters. To change effects, redeploy with different parameter values.
 

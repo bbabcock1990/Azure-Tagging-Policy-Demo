@@ -258,17 +258,16 @@ resource assignment 'Microsoft.Authorization/policyAssignments@2023-04-01' = {
 
 // -------- Role assignment for Modify remediation --------
 // Tag Contributor (4a9ae827-6dc8-4573-8ac7-8239d42aa03f).
-// principalType: 'ServicePrincipal' avoids the Entra-propagation race that
-// can otherwise fail role assignment when the identity was just created.
+// Delegated to a module so the role-assignment NAME can be computed from the
+// managed-identity principalId (a runtime value, lifted to a static module
+// param). principalType: 'ServicePrincipal' avoids the Entra-propagation
+// race that can otherwise fail the role assignment when the identity was
+// just created.
 
-var tagContributorRoleDefId = tenantResourceId('Microsoft.Authorization/roleDefinitions', '4a9ae827-6dc8-4573-8ac7-8239d42aa03f')
-
-resource tagContributorAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(managementGroup().id, assignment.id, tagContributorRoleDefId)
-  properties: {
-    roleDefinitionId: tagContributorRoleDefId
+module tagContributorRA 'modules/tagContributorRoleAssignment.mg.bicep' = {
+  name: 'tagContributorRoleAssignment'
+  params: {
     principalId: assignment.identity.principalId
-    principalType: 'ServicePrincipal'
   }
 }
 
