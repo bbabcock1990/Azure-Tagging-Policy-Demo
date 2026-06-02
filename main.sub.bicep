@@ -3,7 +3,8 @@
 // -------------------------------------------------------------------------
 // Self-contained. Identical resource graph to main.bicep but at subscription
 // scope. Prefer main.bicep when possible (it propagates to every sub beneath
-// the management group).
+// the management group). See main.bicep for the full list of resources
+// deployed and the conditional defaults-pack semantics.
 //
 // Deploy:
 //   az deployment sub create \
@@ -400,7 +401,7 @@ resource assignmentDefaults 'Microsoft.Authorization/policyAssignments@2023-04-0
   }
   properties: {
     displayName: '${organizationName} - RG Tagging Defaults (Remediation Only)'
-    description: 'Provides remediation back-fill for existing RGs missing required tags. enforcementMode=DoNotEnforce so new RG creates are NOT silently auto-tagged — the deny on the main assignment still rejects them. Run remediation tasks against each default-<TagName> reference to back-fill existing RGs.'
+    description: 'Provides remediation back-fill for existing RGs missing required tags. enforcementMode=DoNotEnforce so new RG creates are NOT silently auto-tagged — the deny on the main assignment still rejects them. Run a single remediation task against the `default-rg-tags` reference to back-fill every missing default tag on every non-compliant RG in one PATCH.'
     policyDefinitionId: initiativeDefaults.id
     enforcementMode: 'DoNotEnforce'
   }

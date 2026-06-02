@@ -3,12 +3,18 @@
 // -------------------------------------------------------------------------
 // Self-contained. No external JSON files required.
 //
-// Deploys:
+// Always deploys:
 //   1. Custom policy definition - demo-require-rg-tag       (deny on missing tag, single-tag)
 //   2. Custom policy definition - demo-inherit-tag-from-rg  (modify; propagation, single-tag)
 //   3. Initiative                - demo-rg-tagging-standard (N deny refs + N inherit refs)
 //   4. Policy assignment         - demo-rg-tagging-standard (system-assigned identity)
-//   5. Role assignment           - Tag Contributor for the identity at MG scope
+//   5. Role assignment           - Tag Contributor for the standard assignment's identity
+//
+// Additionally, when `tagDefaults` is supplied (non-empty):
+//   6. Custom policy definition - demo-set-default-rg-tags  (multi-tag modify; one operation per default)
+//   7. Initiative                - demo-rg-tagging-defaults (single `default-rg-tags` reference)
+//   8. Policy assignment         - demo-rg-tagging-defaults (DoNotEnforce; system-assigned identity)
+//   9. Role assignment           - Tag Contributor for the defaults assignment's identity
 //
 // Why the deny policy is single-tag and looped:
 //   Azure Policy does NOT allow runtime functions like current() inside field().
@@ -415,7 +421,7 @@ resource assignmentDefaults 'Microsoft.Authorization/policyAssignments@2023-04-0
   }
   properties: {
     displayName: '${organizationName} - RG Tagging Defaults (Remediation Only)'
-    description: 'Provides remediation back-fill for existing RGs missing required tags. enforcementMode=DoNotEnforce so new RG creates are NOT silently auto-tagged — the deny on the main assignment still rejects them. Run remediation tasks against each default-<TagName> reference to back-fill existing RGs.'
+    description: 'Provides remediation back-fill for existing RGs missing required tags. enforcementMode=DoNotEnforce so new RG creates are NOT silently auto-tagged — the deny on the main assignment still rejects them. Run a single remediation task against the `default-rg-tags` reference to back-fill every missing default tag on every non-compliant RG in one PATCH.'
     policyDefinitionId: initiativeDefaults.id
     enforcementMode: 'DoNotEnforce'
   }

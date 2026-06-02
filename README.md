@@ -85,7 +85,7 @@ If you'd rather not install anything locally, the Azure Portal ships a browser-b
 
 1. Sign in to <https://portal.azure.com>.
 2. Click the **`>_`** Cloud Shell icon in the top-right toolbar (next to the search bar / bell), **or** browse straight to <https://shell.azure.com>.
-3. When prompted, pick **Bash** (recommended — the rest of this walk-through uses bash quoting). You can switch later with `pwsh` / `bash`.
+3. When prompted, pick **Bash** (recommended — the rest of this walk-through uses bash quoting). You can switch later with the **Bash/PowerShell** dropdown at the top-left of the Cloud Shell toolbar, or by typing `pwsh` / `bash` at the prompt.
 4. First-run only: Cloud Shell asks you to create a small storage account for your `$HOME`. Pick any subscription and accept the defaults — it costs cents/month and persists your files across sessions.
 
 #### 2. Confirm tools
@@ -107,8 +107,8 @@ You have two options. Pick whichever is easier:
 ```bash
 git clone https://github.com/bbabcock1990/Azure-Tagging-Policy-Demo.git
 cd Azure-Tagging-Policy-Demo
-ls
-# main.bicep  main.sub.bicep  modules/  README.md  LICENSE
+ls -A
+# .gitignore  LICENSE  README.md  main.bicep  main.sub.bicep  modules/
 ```
 
 **Option B — upload the files via the Cloud Shell toolbar:**
@@ -124,14 +124,15 @@ ls
 This template is designed for management-group scope. List the MGs you have access to:
 
 ```bash
-az account management-group list -o table
-# Name             DisplayName       Id
-# ---------------  ----------------  ------------------------------------------------------------
-# mg-demo-group    Demo Group        /providers/Microsoft.Management/managementGroups/mg-demo-group
-# tenant-root      Tenant Root       /providers/Microsoft.Management/managementGroups/<tenant-id>
+az account management-group list \
+  --query "[].{Name:name, DisplayName:displayName}" -o table
+# Name             DisplayName
+# ---------------  ---------------
+# mg-demo-group    Demo Group
+# tenant-root      Tenant Root
 ```
 
-The `--management-group-id` flag on the deploy command takes the short **Name** (left column), e.g. `mg-demo-group` — not the full resource ID.
+The `--management-group-id` flag on the deploy command takes the short **Name** value (left column), e.g. `mg-demo-group` — not the full resource ID.
 
 If you'd rather scope to a single subscription, list them with `az account list -o table` and copy the `SubscriptionId` for the [Subscription-scope command](#subscription-scope) instead.
 
