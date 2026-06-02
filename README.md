@@ -78,6 +78,20 @@ Two parameters are **required** on every deploy — there are no defaults:
 
 ### Management-group scope (recommended)
 
+**Bash / zsh / Cloud Shell:**
+
+```bash
+az deployment mg create \
+  --name tagging-demo \
+  --management-group-id <your-management-group-id> \
+  --location eastus2 \
+  --template-file main.bicep \
+  --parameters organizationName='Acme Corp' \
+               tagsToEnforce='["Environment","CostCenter","Owner","Application"]'
+```
+
+**PowerShell (Windows / pwsh):**
+
 ```powershell
 az deployment mg create `
   --name tagging-demo `
@@ -88,7 +102,23 @@ az deployment mg create `
                tagsToEnforce='[\"Environment\",\"CostCenter\",\"Owner\",\"Application\"]'
 ```
 
+> **Shell escaping matters.** In bash the JSON inside single quotes goes through literally, so `"..."` is fine. In PowerShell the parser still touches `"`, so you must escape them as `\"`. Mixing the two is the most common cause of `Failed to parse string as JSON`.
+
 ### Subscription scope
+
+**Bash:**
+
+```bash
+az deployment sub create \
+  --name tagging-demo \
+  --subscription <subscriptionId> \
+  --location eastus2 \
+  --template-file main.sub.bicep \
+  --parameters organizationName='Acme Corp' \
+               tagsToEnforce='["Environment","CostCenter","Owner","Application"]'
+```
+
+**PowerShell:**
 
 ```powershell
 az deployment sub create `
@@ -102,6 +132,19 @@ az deployment sub create `
 
 ### What-if (preview before deploying)
 
+**Bash:**
+
+```bash
+az deployment mg what-if \
+  --management-group-id <your-management-group-id> \
+  --location eastus2 \
+  --template-file main.bicep \
+  --parameters organizationName='Acme Corp' \
+               tagsToEnforce='["Environment","CostCenter","Owner"]'
+```
+
+**PowerShell:**
+
 ```powershell
 az deployment mg what-if `
   --management-group-id <your-management-group-id> `
@@ -111,11 +154,49 @@ az deployment mg what-if `
                tagsToEnforce='[\"Environment\",\"CostCenter\",\"Owner\"]'
 ```
 
+### Parameters file alternative (shell-agnostic)
+
+If the quoting gymnastics get painful, drop the values into `params.json` and reference it instead — this works identically in bash, PowerShell, and the Azure portal:
+
+```json
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "organizationName": { "value": "Acme Corp" },
+    "tagsToEnforce":    { "value": ["Environment", "CostCenter", "Owner", "Application"] }
+  }
+}
+```
+
+```bash
+az deployment mg create \
+  --name tagging-demo \
+  --management-group-id <your-management-group-id> \
+  --location eastus2 \
+  --template-file main.bicep \
+  --parameters @params.json
+```
+
 ## Customize
 
 ### Different required tags
 
 Pass any list of tag names. Both the deny rules and the inherit rules are generated from the same array, so the two sides never drift out of sync:
+
+**Bash:**
+
+```bash
+az deployment mg create \
+  --name tagging-demo \
+  --management-group-id <your-management-group-id> \
+  --location eastus2 \
+  --template-file main.bicep \
+  --parameters organizationName='Acme Corp' \
+               tagsToEnforce='["Environment","CostCenter","Owner","Application","DataClassification"]'
+```
+
+**PowerShell:**
 
 ```powershell
 az deployment mg create `
@@ -131,6 +212,20 @@ az deployment mg create `
 
 `organizationName` flows into every visible string. Override it per customer so e.g. the assignment shows up as `"Acme Corp - RG Tagging Standard (Assignment)"` and the deny message reads `"Acme Corp Governance: This resource group is missing the required tag 'Environment'..."`:
 
+**Bash:**
+
+```bash
+az deployment mg create \
+  --name tagging-demo \
+  --management-group-id <your-management-group-id> \
+  --location eastus2 \
+  --template-file main.bicep \
+  --parameters organizationName='Acme Corp' \
+               tagsToEnforce='["Environment","CostCenter","Owner"]'
+```
+
+**PowerShell:**
+
 ```powershell
 az deployment mg create `
   --name tagging-demo `
@@ -142,6 +237,21 @@ az deployment mg create `
 ```
 
 ### Soft rollout (audit, not deny)
+
+**Bash:**
+
+```bash
+az deployment mg create \
+  --name tagging-demo \
+  --management-group-id <your-management-group-id> \
+  --location eastus2 \
+  --template-file main.bicep \
+  --parameters organizationName='Acme Corp' \
+               tagsToEnforce='["Environment","CostCenter","Owner"]' \
+               denyEffect=audit inheritEffect=audit
+```
+
+**PowerShell:**
 
 ```powershell
 az deployment mg create `
