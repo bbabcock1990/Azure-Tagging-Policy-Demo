@@ -3,10 +3,10 @@
 A self-contained, demonstration Azure Policy pack that:
 
 1. **Denies** any resource-group create/update missing one or more required tags (or where a required tag has an empty value).
-2. **Propagates** each required tag down to every resource inside the RG using the `modify` effect, so child resources automatically inherit `Environment`, `CostCenter`, `Owner`, `Application` (configurable).
+2. **Propagates** each required tag down to every resource inside the RG using the `modify` effect, so child resources automatically inherit whatever tag set you choose to enforce.
 3. Returns **per-tag custom error messages** at deployment time that name exactly which tag is missing.
 
-Designed as a starter / teaching example. Bicep-first. No external files required — everything is inlined.
+Designed as a starter / teaching example. Bicep-first. No external files required — everything is inlined. The customer/organization name and the list of required tags are both supplied at deploy time — there are no hard-coded defaults baked into the template.
 
 ## Files
 
@@ -31,7 +31,9 @@ Designed as a starter / teaching example. Bicep-first. No external files require
 | Assignment | `demo-rg-tagging-standard` | System-assigned identity. Per-ref non-compliance messages. |
 | Role assignment | Tag Contributor at the target scope | Granted to the assignment's managed identity so `modify` remediation can write tags. |
 
-## Required tags (defaults)
+## Sample tag schema
+
+`tagsToEnforce` is a required parameter — you must supply your own list per deploy. The table below is a suggested starter set you can paste into the `--parameters` flag and edit:
 
 | Tag | Example | Purpose |
 | --- | --- | --- |
@@ -40,7 +42,7 @@ Designed as a starter / teaching example. Bicep-first. No external files require
 | `Owner` | `cloudops@example.com` | Accountability / paging |
 | `Application` | `Billing-API` | Workload mapping |
 
-Override the tag list at deploy time via the `tagsToEnforce` parameter (see below).
+See [Deploy → Required parameters](#required-parameters) for how to pass this list.
 
 ## Why single-tag policies + a looped initiative?
 
@@ -163,21 +165,22 @@ Recommended rollout path:
 ## Test
 
 ```powershell
-# Should be DENIED (4 per-tag error messages — one for each missing tag)
+# Should be DENIED — one per-tag error message for each tag in tagsToEnforce
 az group create -n rg-tagging-demo-bad -l eastus2
 
 # Should SUCCEED. Any resource created inside will inherit these tags via Modify.
+# Tag set below assumes you deployed with tagsToEnforce=["Environment","CostCenter","Owner","Application"].
 az group create -n rg-tagging-demo-good -l eastus2 `
   --tags Environment=dev CostCenter=CC-1234 Owner=cloudops@example.com Application=Billing-API
 ```
 
 ## Non-compliance message UX
 
-The assignment attaches one message per `require-<TagName>` reference. If a user creates an RG missing all four tags, they see four distinct messages — one for each missing tag. If only one tag is missing, they see one message naming that specific tag.
+The assignment attaches one message per `require-<TagName>` reference. If a user creates an RG missing every tag in `tagsToEnforce`, they see one distinct message per missing tag. If only one tag is missing, they see one message naming that specific tag.
 
-Example (when `Environment` is missing):
+Example (when `Environment` is missing, deployed with `organizationName='Acme Corp'` and `tagsToEnforce=["Environment","CostCenter","Owner","Application"]`):
 
-> This resource group is missing the required tag 'Environment'. Every RG must carry these tags with non-empty values: Environment, CostCenter, Owner, Application. Add the missing tag(s) and retry. Child resources will inherit these tags automatically.
+> Acme Corp Governance: This resource group is missing the required tag 'Environment'. Every RG must carry these tags with non-empty values: Environment, CostCenter, Owner, Application. Add the missing tag(s) and retry. Child resources will inherit these tags automatically.
 
 ## Remediating existing resources
 
@@ -185,7 +188,7 @@ The `modify` effect auto-applies to **new** child resources. To back-fill existi
 
 1. Portal → **Policy** → **Remediation**.
 2. Find the `demo-rg-tagging-standard` assignment.
-3. Create one remediation task per `inherit-<TagName>` reference (one each for Environment, CostCenter, Owner, Application by default).
+3. Create one remediation task per `inherit-<TagName>` reference — one per tag you passed in `tagsToEnforce`.
 
 ## Cleanup
 
